@@ -8,7 +8,6 @@ from scipy.interpolate import RectBivariateSpline
 import linear_solver
 
 
-
 class NavierStokesSolver:
     
     scheme              : Literal["central_difference", "upwind", "hybrid"]
@@ -235,9 +234,6 @@ class NavierStokesSolver:
             
             self._construct_problem_(objective='m')
             
-            # self.b['u'][1:-1, 1:-1] += -self._p_src_('u')
-            # self.b['v'][1:-1, 1:-1] += -self._p_src_('v')
-            
             self._solve_sparse_(objective='u') if solveSparse else self._solve_jacobi_(objective='u', tolerance=tolerance, max_iter=max_iter)
             self._solve_sparse_(objective='v') if solveSparse else self._solve_jacobi_(objective='v', tolerance=tolerance, max_iter=max_iter)
             
@@ -416,77 +412,19 @@ class NavierStokesSolver:
                 )
             
         if objective == '\phi':
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['\phi'], self.x['\phi'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['\phi'], self.B['\phi'])
         else:
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['u'], self.x['u'])
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['v'], self.x['v'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['u'], self.B['u'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['v'], self.B['v'])
             
-            self.b['u'] -= self._p_src_('u')
-            self.b['u'] -= self._p_src_('v')
+            self.b['u'][1:-1, 1:-1] -= self._p_src_('u')
+            self.b['v'][1:-1, 1:-1] -= self._p_src_('v')
             
-            self.A['m']['p'] /= self.alpha_m
-            self.b['u'] += (1 - self.alpha_m) * self.A['m']['p'] * self.x['u'][1:-1, 1:-1]
-            self.b['v'] += (1 - self.alpha_m) * self.A['m']['p'] * self.x['v'][1:-1, 1:-1]
-            
-        
-            
-        # for i in range(1, self.n_rows+1):
-        #     for j in range(1, self.n_cols+1):
-
-        #         coeffs = self._get_coeffs_(i=i, j=j, objective=objective)
-        #         self._set_arrays_(
-        #             *coeffs, 
-        #             i=i, j=j,
-        #             objective=objective
-        #         )
-                                         
-    # def _get_coeffs_(self, 
-    #     i,j,
-    #     objective: Literal["\phi", "m"] = "\phi"
-    #     ):
-            
-    #     a_nb = {'w': 0, 'e': 0, 'n': 0, 's': 0}
-    #     S_terms = {'w': 0, 'e': 0, 'n': 0, 's': 0}
-        
-        
-    #     if self.scheme == "central_difference":
-        
-    #         for nbr in a_nb.keys():
-    #             self._nbr_coeff_cd_(nbr, i,j, a_nb, S_terms)
-            
-    #     elif self.scheme == "upwind":
-            
-    #         for nbr in a_nb.keys():
-    #             self._nbr_coeff_upwind_(nbr, i,j, a_nb, S_terms)
-                
-    #     elif self.scheme == "hybrid":
-            
-    #         for nbr in a_nb.keys():
-    #             self._nbr_coeff_hybrid_(nbr, i,j, a_nb, S_terms)
-                
-    #     else:
-    #         pass
-        
-    #     S_p = -sum([v for v in S_terms.values()])
-    #     a_P = sum([a for a in a_nb.values()]) + self._f_('e', i, j) - self._f_('w', i, j) + self._f_('n', i, j) - self._f_('s', i, j) - S_p
-    #     S_u = None
-        
-    #     if objective == '\phi':  
-            
-    #         S_u = sum([self.B[objective][face] * S_terms[face] for face in S_terms.keys()])
-            
-    #     else:
-            
-    #         S_u = [
-    #             sum([self.B[o][face] * S_terms[face] for face in S_terms.keys()]) + \
-    #             (1 - self.alpha_m) * (a_P / self.alpha_m) * self.x[o][i,j]  
-    #             for o in ['u', 'v']]
-    #         a_P /= self.alpha_m
-
-    #     return a_P, a_nb['e'], a_nb['w'], a_nb['n'], a_nb['s'], S_u
-            
+            self.A['m']['p'][1:-1, 1:-1] /= self.alpha_m
+            self.b['u'][1:-1, 1:-1] += (1 - self.alpha_m) * self.A['m']['p'][1:-1, 1:-1] * self.x['u'][1:-1, 1:-1]
+            self.b['v'][1:-1, 1:-1] += (1 - self.alpha_m) * self.A['m']['p'][1:-1, 1:-1] * self.x['v'][1:-1, 1:-1]
+             
     def _p_src_(self, objective):
-
         
         if objective == "u":
             return  (1/2) * (self.x['p'][1:-1, 2:] - self.x['p'][1:-1, 0:-2]) * self._area_('e') 
@@ -494,80 +432,22 @@ class NavierStokesSolver:
         elif objective == "v":
             return (1/2) * (self.x['p'][0:-2, 1:-1] - self.x['p'][2:, 1:-1]) * self._area_('n')
         
-
-    def _mass_flux_(self):
-        f_e = self._area_('e') * self.x['u_f'][1:-1, 1:]
-        f_w = self._area_('w') * self.x['u_f'][1:-1, :-1]
-        f_n = self._area_('n') * self.x['v_f'][1:, 1:-1]
-        f_s = self._area_('s') * self.x['v_f'][:-1, 1:-1]
+    def _set_arrays_(self, a_P, a_E, a_W, a_N, a_S, S_u, i, j, objective: Literal['\phi', 'm', 'p\'']='\phi'):
         
-        return f_e - f_w + f_n - f_s
-        
-    # def _set_arrays_(self, a_P, a_E, a_W, a_N, a_S, S_u, i, j, objective: Literal['\phi', 'm', 'p\'']='\phi'):
-        
-    #     self.A[objective]['p'][i, j] = np.float32(a_P)
-    #     self.A[objective]['e'][i, j] = np.float32(a_E)
-    #     self.A[objective]['w'][i, j] = np.float32(a_W)
-    #     self.A[objective]['n'][i, j] = np.float32(a_N)
-    #     self.A[objective]['s'][i, j] = np.float32(a_S)
+        self.A[objective]['p'][i, j] = np.float32(a_P)
+        self.A[objective]['e'][i, j] = np.float32(a_E)
+        self.A[objective]['w'][i, j] = np.float32(a_W)
+        self.A[objective]['n'][i, j] = np.float32(a_N)
+        self.A[objective]['s'][i, j] = np.float32(a_S)
               
-    #     if objective != 'm':
-    #         self.b[objective][i, j] = np.float32(S_u)
-    #     else:
-    #         self.b['u'][i, j] = np.float32(S_u[0])
-    #         self.b['v'][i, j] = np.float32(S_u[1])
-    
-    # def _to_sparse__(self, a_E, a_W, a_N, a_S, a_P):
-    #     nrows = self.n_rows
-    #     ncols = self.n_cols
-    #     num_cells = self.n_rows * self.n_cols
-
-    #     data, row, col = [], [], []
-
-    #     def index(i, j):
-    #         return i * ncols + j
-
-    #     for i in range(1, nrows+1):  
-    #         for j in range(1, ncols+1): 
-
-    #             center = index(i-1 , j-1)  
-
-    #             # Central coefficient (diagonal)
-    #             data.append(a_P[i, j])
-    #             row.append(center)
-    #             col.append(center)
-
-    #             # East neighbor
-    #             if j < ncols:  # Exclude right cells
-    #                 data.append(-a_E[i, j])
-    #                 row.append(center)
-    #                 col.append(index((i-1), (j-1) + 1))
-
-    #             # West neighbor
-    #             if j > 1:  # Exclude left cells
-    #                 data.append(-a_W[i, j])
-    #                 row.append(center)
-    #                 col.append(index((i-1), (j-1) - 1))
-
-    #             # North neighbor
-    #             if i > 1:  # Exclude top cells
-    #                 data.append(-a_N[i, j])
-    #                 row.append(center)
-    #                 col.append(index((i-1) - 1, (j-1)))
-
-    #             # South neighbor
-    #             if i < nrows:  # Exclude bottom cells
-    #                 data.append(-a_S[i, j])
-    #                 row.append(center)
-    #                 col.append(index((i-1) + 1, (j-1)))
-
-    #     # Assemble into a sparse matrix
-    #     A_coo = coo_matrix((data, (row, col)), shape=(num_cells, num_cells))
-    #     return A_coo.tocsc()
+        if objective != 'm':
+            self.b[objective][i, j] = np.float32(S_u)
+        else:
+            self.b['u'][i, j] = np.float32(S_u[0])
+            self.b['v'][i, j] = np.float32(S_u[1])
     
     def _to_sparse_(self, a_E, a_W, a_N, a_S, a_P):
         nrows, ncols = self.n_rows, self.n_cols
-        num_cells = nrows * ncols
 
         # Flatten all coefficients
         a_P_flat = a_P[1:-1, 1:-1].flatten()  # Center
@@ -585,16 +465,6 @@ class NavierStokesSolver:
 
         # Convert to CSC format for solver compatibility
         return self.A_diag.tocsc()    
-    
-    def _clear_a_diag(self):
-        
-        nrows, ncols = self.n_rows, self.n_cols
-        num_cells = nrows * ncols
-        self.A_diag.setdiag(0, k=0) 
-        self.A_diag.setdiag(0, k=1)    
-        self.A_diag.setdiag(0, k=-1)     
-        self.A_diag.setdiag(0, k=-ncols)  
-        self.A_diag.setdiag(0, k=ncols)
             
     def _solve_sparse_(self, objective: Literal["\phi", "m", "p\'"] = "\phi") -> Tuple[np.ndarray, float] :
         
@@ -608,7 +478,7 @@ class NavierStokesSolver:
             )
         bflat = self.b[objective][1:-1,1:-1].flatten()
         x, res = linear_solver.solve(acsc, bflat)
-        #self._clear_a_diag()
+
         self.error = res
         
         self.x[objective][1:-1, 1:-1] = x.reshape((self.n_rows, self.n_cols))
@@ -652,42 +522,6 @@ class NavierStokesSolver:
                                                                                                                                                                                       
     def _p_corr_coeffs_(self):
         
-        # for i in range(1, self.n_cols+1):
-        #     for j in range(1, self.n_cols+1):
-                
-        #         a_p = self.A['m']['p'][i, j]
-        #         a_n = self.A['m']['p'][i-1, j]
-        #         a_s = self.A['m']['p'][i+1, j]
-        #         a_e = self.A['m']['p'][i, j+1]
-        #         a_w = self.A['m']['p'][i, j-1]
-                
-        #         d_px = self._area_('e') / a_p
-        #         d_py = self._area_('n') / a_p
-        #         d_e = (1/2) * (self._area_('e') / a_e + d_px) if not self._at_edge_('e', i, j) else 0
-        #         d_w = (1/2) * (self._area_('w') / a_w + d_px) if not self._at_edge_('w', i, j) else 0
-        #         d_n = (1/2) * (self._area_('n') / a_n + d_py) if not self._at_edge_('n', i, j) else 0 
-        #         d_s = (1/2) * (self._area_('s') / a_s + d_py) if not self._at_edge_('s', i, j) else 0
-                
-        #         self.A['p\'']['e'][i, j] = self.alpha_m * d_e * self._area_('e')
-        #         self.A['p\'']['w'][i, j] = self.alpha_m * d_w * self._area_('w')
-        #         self.A['p\'']['n'][i, j] = self.alpha_m * d_n * self._area_('n')
-        #         self.A['p\'']['s'][i, j] = self.alpha_m * d_s * self._area_('s')
-
-        #         self.A['p\'']['p'][i, j] = sum([self.A['p\''][nbr][i, j] for nbr in ['n', 's', 'e', 'w']])
-                
-        #         # this part depends on face velocities from RHIE CHOW interpolation of center 
-        #         # velocities, so _get_p_coeffs_ can be called **only** after face velocities 
-        #         # have been computed
-        #         # =============================RHIE_CHOW_DEPENDENT================================ #
-        #         uf_e = self.x['u_f'][i, j]
-        #         uf_w = self.x['u_f'][i, j-1]
-        #         uf_s = self.x['v_f'][i, j]
-        #         uf_n = self.x['v_f'][i-1, j]
-        #         self.b['p\''][i, j] = (
-        #             (uf_w * self._area_('w') - uf_e * self._area_('e')) 
-        #             + (uf_s * self._area_('s') - uf_n * self._area_('n')) 
-        #             )
-        #         # =============================RHIE_CHOW_DEPENDENT================================ #
         
         a_p = self.A['m']['p'][1:-1, 1:-1]
         a_n = self.A['m']['p'][:-2, 1:-1]
@@ -723,44 +557,42 @@ class NavierStokesSolver:
         uf_s = self.x['v_f'][1:, 1:-1]
         uf_n = self.x['v_f'][:-1, 1:-1]
 
+        # =============================RHIE_CHOW_DEPENDENT================================ #
         self.b['p\''][1:-1, 1:-1] = (
             (uf_w * self._area_('w') - uf_e * self._area_('e'))
             + (uf_s * self._area_('s') - uf_n * self._area_('n'))
         )
+        # =============================RHIE_CHOW_DEPENDENT================================ #
 
 
     def _scalar_coeff_cd_(self, A_p, A_e, A_w, A_n, A_s):
         
         F_e = self.x['u_f'][1:-1, 1:] * self._area_('e')
         F_w = self.x['u_f'][1:-1, :-1] * self._area_('w')
-        F_n = self.x['v_f'][1:, 1:-1] * self._area_('n')
-        F_s = self.x['v_f'][:-1, 1:-1] * self._area_('s')
+        F_n = self.x['v_f'][:-1, 1:-1] * self._area_('n')
+        F_s = self.x['v_f'][1:, 1:-1] * self._area_('s')
         
         A_e[1:-1, 1:-2] =  self.D['e']      - (1/2) *   F_e[:, :-1]   
         A_e[1:-1, -2]   =  0
         b_e             =  2 * self.D['e']  -           F_e[:, -1]
-        # b[1:-1, -2]     += b_e * x[1:-1, -1]
-        A_p[1:-1, -2]   -= b_e
         
         A_w[1:-1, 2:-1] =  self.D['w']      + (1/2) *   F_w[:, 1:]
         A_w[1:-1, 1]    =  0
         b_w             =  2 * self.D['w']  +           F_w[:, 0]   
-        # b[1:-1, 1]      += b_w * x[1:-1, 0]
-        A_p[1:-1, 1]    -= b_w
         
-        A_n[2:-1, 1:-1] =  self.D['n']      - (1/2) *   F_n[:-1, :]
+        A_n[2:-1, 1:-1] =  self.D['n']      - (1/2) *   F_n[1:, :]
         A_n[1, 1:-1]    =  0
-        b_n             =  2 * self.D['n']  -           F_n[-1, :] 
-        # b[1, 1:-1]      += b_n * x[0, 1:-1]
-        A_p[1, 1:-1]    -= b_n
+        b_n             =  2 * self.D['n']  -           F_n[0, :] 
         
-        A_s[1:-2, 1:-1] =  self.D['s']      + (1/2) *   F_s[1:, :]
+        A_s[1:-2, 1:-1] =  self.D['s']      + (1/2) *   F_s[:-1, :]
         A_s[-2, 1:-1]   =  0
-        b_s             =  2 * self.D['s']  +           F_s[0, :]
-        # b[-2, 1:-1]     += b_s * x[-1, 1:-1]
-        A_p[-2, 1:-1]   -= b_s
+        b_s             =  2 * self.D['s']  +           F_s[-1, :]
         
         A_p[1:-1, 1:-1] = A_e[1:-1, 1:-1] + A_w[1:-1, 1:-1] + A_n[1:-1, 1:-1] + A_s[1:-1, 1:-1]  + F_e - F_w + F_n - F_s
+        A_p[1:-1, -2]   += b_e
+        A_p[1:-1, 1]    += b_w
+        A_p[1, 1:-1]    += b_n
+        A_p[-2, 1:-1]   += b_s
         
         return b_e, b_w, b_n, b_s
         
@@ -769,157 +601,75 @@ class NavierStokesSolver:
      
         F_e = self.x['u_f'][1:-1, 1:] * self._area_('e')
         F_w = self.x['u_f'][1:-1, :-1] * self._area_('w')
-        F_n = self.x['v_f'][1:, 1:-1] * self._area_('n')
-        F_s = self.x['v_f'][:-1, 1:-1] * self._area_('s')
+        F_n = self.x['v_f'][:-1, 1:-1] * self._area_('n')
+        F_s = self.x['v_f'][1:, 1:-1] * self._area_('s')
         
         A_e[1:-1, 1:-2] =  self.D['e']          +   np.maximum(0, -F_e[:, :-1])   
         A_e[1:-1, -2]   =  0
         b_e             =  2 * self.D['e']      +   np.maximum(0, -F_e[:, -1])
-        # b[1:-1, -2]     += b_e * x[1:-1, -1]
-        A_p[1:-1, -2]   -= b_e
         
         A_w[1:-1, 2:-1] =  self.D['w']          +   np.maximum(0, F_w[:, 1:])
         A_w[1:-1, 1]    =  0
         b_w             =  2 * self.D['w']      +   np.maximum(0, F_w[:, 0])
-        # b[1:-1, 1]      += b_w * x[1:-1, 0]
-        A_p[1:-1, 1]    -= b_w
         
-        A_n[2:-1, 1:-1] =  self.D['n']          +   np.maximum(0, -F_n[:-1, :])
+        A_n[2:-1, 1:-1] =  self.D['n']          +   np.maximum(0, -F_n[1:, :])
         A_n[1, 1:-1]    =  0
-        b_n             =  2 * self.D['n']      +   np.maximum(0, -F_n[-1, :])
-        # b[1, 1:-1]      += b_n * x[0, 1:-1]
-        A_p[1, 1:-1]    -= b_n
+        b_n             =  2 * self.D['n']      +   np.maximum(0, -F_n[0, :])
         
-        A_s[1:-2, 1:-1] =  self.D['s']          +   np.maximum(0, F_s[1:, :])
+        A_s[1:-2, 1:-1] =  self.D['s']          +   np.maximum(0, F_s[:-1, :])
         A_s[-2, 1:-1]   =  0
-        b_s             =  2 * self.D['s']      +   np.maximum(0, F_s[0, :])
-        # b[-2, 1:-1]     += b_s * x[-1, 1:-1]
-        A_p[-2, 1:-1]   -= b_s
-        
+        b_s             =  2 * self.D['s']      +   np.maximum(0, F_s[-1, :])
         
         A_p[1:-1, 1:-1] = A_e[1:-1, 1:-1] + A_w[1:-1, 1:-1] + A_n[1:-1, 1:-1] + A_s[1:-1, 1:-1] + F_e - F_w + F_n - F_s
+        A_p[1:-1, -2]   += b_e
+        A_p[1:-1, 1]    += b_w
+        A_p[1, 1:-1]    += b_n
+        A_p[-2, 1:-1]   += b_s
+        
         return b_e, b_w, b_n, b_s
     
     def _scalar_coeff_hybrid_(self, A_p, A_e, A_w, A_n, A_s):
         
         F_e = self.x['u_f'][1:-1, 1:] * self._area_('e')
         F_w = self.x['u_f'][1:-1, :-1] * self._area_('w')
-        F_n = self.x['v_f'][1:, 1:-1] * self._area_('n')
-        F_s = self.x['v_f'][:-1, 1:-1] * self._area_('s')
+        F_n = self.x['v_f'][:-1, 1:-1] * self._area_('n')
+        F_s = self.x['v_f'][1:, 1:-1] * self._area_('s')
 
         A_e[1:-1, 1:-2] = np.maximum(  self.D['e'] - (1/2) * F_e[:, :-1],  np.maximum(0, -F_e[:, :-1]))   
         A_e[1:-1, -2]   = 0
         b_e             = np.maximum(  2 * self.D['e']  - F_e[:, -1],      np.maximum(0, -F_e[:, -1]))
-        # b[1:-1, -2]     += b_e * x[1:-1, -1]
-        A_p[1:-1, -2]   -= b_e                
         
         A_w[1:-1, 2:-1] = np.maximum(  self.D['w'] + (1/2) * F_w[:, 1:],   np.maximum(0, F_w[:, 1:]))
         A_w[1:-1, 1]    = 0
         b_w             = np.maximum(  2 * self.D['w'] + F_w[:, 0],        np.maximum(0, F_w[:, 0]))
-        # b[1:-1, 1]      += b_w * x[1:-1, 0]
-        A_p[1:-1, 1]    -= b_w
         
-        A_n[2:-1, 1:-1] = np.maximum(  self.D['n'] - (1/2) * F_n[:-1, :],   np.maximum(0, -F_n[:-1, :])) 
+        A_n[2:-1, 1:-1] = np.maximum(  self.D['n'] - (1/2) * F_n[1:, :],   np.maximum(0, -F_n[1:, :])) 
         A_n[1, 1:-1]    = 0
-        b_n             = np.maximum(   2 * self.D['n'] - F_n[-1, :],       np.maximum(0, -F_n[-1, :]))
-        # b[1, 1:-1]      += b_n
-        A_p[1, 1:-1]    -= b_n
+        b_n             = np.maximum(   2 * self.D['n'] - F_n[0, :],       np.maximum(0, -F_n[0, :]))
         
-        A_s[1:-2, 1:-1] = np.maximum( self.D['s'] + (1/2) * F_s[1:, :],     np.maximum(0, F_s[1:, :]))
+        A_s[1:-2, 1:-1] = np.maximum( self.D['s'] + (1/2) * F_s[:-1, :],     np.maximum(0, F_s[:-1, :]))
         A_s[-2, 1:-1]   = 0
-        b_s             = np.maximum(  2 * self.D['s'] + F_s[0, :],         np.maximum(0, F_s[0, :]))   
-        # b[-2, 1:-1]     += b_s
-        A_p[-2, 1:-1]   -= b_s 
-        
+        b_s             = np.maximum(  2 * self.D['s'] + F_s[-1, :],         np.maximum(0, F_s[-1, :]))   
         
         A_p[1:-1, 1:-1] = A_e[1:-1, 1:-1] + A_w[1:-1, 1:-1] + A_n[1:-1, 1:-1] + A_s[1:-1, 1:-1]  + F_e - F_w + F_n - F_s
+        A_p[1:-1, -2]   += b_e                
+        A_p[1:-1, 1]    += b_w
+        A_p[1, 1:-1]    += b_n
+        A_p[-2, 1:-1]   += b_s 
+        
         return b_e, b_w, b_n, b_s  
     
-    def _scalar_src_(self, b_e, b_w, b_n, b_s, b, x):
+    def _scalar_src_(self, b_e, b_w, b_n, b_s, b, B):
         
-        b[1:-1, -2]     += b_e * x[1:-1, -1]
-        b[1:-1, 1]      += b_w * x[1:-1, 0]
-        b[1, 1:-1]      += b_n * x[0, 1:-1]
-        b[-2, 1:-1]     += b_s * x[-1, 1:-1]
-
-
-    # def _nbr_coeff_cd_(self, nbr, i,j, a_nb, S_terms):
-        
-    #     F =  self._f_(nbr, i, j)
-    #     if not self._at_edge_(nbr, i, j):
-    #         if nbr in ['w', 's']:
-    #             a_nb[nbr] = self.D[nbr] + F / 2
-    #         else:
-    #             a_nb[nbr] = self.D[nbr] - F / 2
-    #     else:
-    #         if nbr in ['w', 's']:
-    #             S_terms[nbr] = 2 * self.D[nbr] + F
-    #         else:
-    #             S_terms[nbr] = 2 * self.D[nbr] - F
-                
-    # def _nbr_coeff_upwind_(self, nbr, i, j, a_nb, S_terms):           
-  
-    #     F =  self._f_(nbr, i, j)
-        
-    #     if not self._at_edge_(nbr, i, j):
-    #         if nbr in ['w', 's']:
-    #             a_nb[nbr] = self.D[nbr] + max(F, 0)
-    #         else:
-    #             a_nb[nbr] = self.D[nbr] + max(0, -F)
-    #     else:
-    #         if nbr in ['w', 's']:
-    #             S_terms[nbr] = 2 * self.D[nbr] + max(F, 0)
-
-    #         else:
-    #             S_terms[nbr] = 2 * self.D[nbr] + max(0, -F)
-                    
-    # def _nbr_coeff_hybrid_(self, nbr, i, j, a_nb, S_terms):
-        
-    #     P_e = self._peclet_(nbr, i, j)
-        
-    #     if abs(P_e) < 2:
-    #         self._nbr_coeff_cd_(nbr, i, j, a_nb, S_terms)
-    #     else:
-            
-    #         F =  self._f_(nbr, i, j)
-            
-    #         if not self._at_edge_(nbr, i, j):
-    #             if nbr in ['w', 's']:
-    #                 a_nb[nbr] = max(F, 0)
-    #             else:
-    #                 a_nb[nbr] = max(0, -F)
-    #         else:
-    #             if nbr in ['w', 's']:
-    #                 S_terms[nbr] = 2 * max(F, 0)
-
-    #             else:
-    #                 S_terms[nbr] = 2 * max(0, -F)
+        b[:, :]         =0
+        b[1:-1, -2]     += b_e * B['e']
+        b[1:-1, 1]      += b_w * B['w']
+        b[1, 1:-1]      += b_n * B['n']
+        b[-2, 1:-1]     += b_s * B['s']
+       
                     
     def _interp_face_v_(self):
         
-        # for i in range(1, self.n_rows + 1): # ignore east faces in top and  bottom ghost row cells
-        #     for j in range(1, self.n_cols): # iterate over east faces (skip boundaries)
-                
-        #         a_e = self.A['m']['p'][i, j+1]
-        #         a_p = self.A['m']['p'][i, j]
-                
-        #         u_e = self.x['u'][i, j+1]
-        #         u_p = self.x['u'][i, j]
-                
-        #         p_ee    = self.x['p'][i, j+2]
-        #         p_e     = self.x['p'][i, j+1]
-        #         p_p     = self.x['p'][i, j]
-        #         p_w     = self.x['p'][i, j-1]
-                
-        #         d_e = (self._area_('e') / a_e) * self.alpha_m
-        #         d_p = (self._area_('e') / a_p) * self.alpha_m
-        
-        #         self.x['u_f'][i, j] = (
-        #             (1/2) * (u_e + u_p)
-        #             - (1/2) * (d_e + d_p) * (p_e - p_p)
-        #             + (1/2) * d_p * ((1/2) * (p_e - p_w))
-        #             + (1/2) * d_e * ((1/2) * (p_ee - p_p))
-        #         )
         
         a_e = self.A['m']['p'][1:-1, 2:-1]   # a_e at east face (skip ghost rows and east boundary)
         a_p = self.A['m']['p'][1:-1, 1:-2]  # a_p at cell center
@@ -943,30 +693,7 @@ class NavierStokesSolver:
             + (1 / 2) * d_p * ((1 / 2) * (p_e - p_w))
             + (1 / 2) * d_e * ((1 / 2) * (p_ee - p_p))
         )
-                
-        # for i in range(1, self.n_rows): # iterate over south faces
-        #     for j in range(1, self.n_cols + 1): # ignore south faces in left and right ghost column cells
-                
-        #         a_s = self.A['m']['p'][i+1, j]
-        #         a_p = self.A['m']['p'][i, j]
-                
-        #         v_s = self.x['v'][i+1, j]
-        #         v_p = self.x['v'][i, j]
-                
-        #         p_n     = self.x['p'][i-1, j]
-        #         p_p     = self.x['p'][i, j]
-        #         p_s     = self.x['p'][i+1, j]
-        #         p_ss    = self.x['p'][i+2, j]
-                
-        #         d_s = (self._area_('s') / a_s) * self.alpha_m
-        #         d_p = (self._area_('s') / a_p) * self.alpha_m
-                
-        #         self.x['v_f'][i, j] = (
-        #             (1/2) * (v_s + v_p)
-        #             - (1/2) * (d_s + d_p) * (p_p - p_s)
-        #             + (1/2) * d_p * ((1/2) * (p_n - p_s))
-        #             + (1/2) * d_s * ((1/2) * (p_p - p_ss))
-        #                 )
+
         
         a_s = self.A['m']['p'][2:-1, 1:-1]     # a_s at south face (skip ghost row and bottom boundary)
         a_p = self.A['m']['p'][1:-2, 1:-1]   # a_p at cell center
@@ -1006,23 +733,6 @@ class NavierStokesSolver:
         
     def _correct_cell_v_(self):
         
-        # for i in range(1, self.n_rows + 1): # ignore top and bottom ghost rows
-        #     for j in range(1, self.n_cols + 1): # ignore left and right ghost columns
-                
-        #         a_p = self.A['m']['p'][i, j]
-            
-        #         p_p = self.x['p\''][i, j]
-        #         p_w = self.x['p\''][i, j-1] if not self._at_edge_('w', i, j) else p_p
-        #         p_e = self.x['p\''][i, j+1] if not self._at_edge_('e', i, j) else p_p
-        #         p_s = self.x['p\''][i+1, j] if not self._at_edge_('s', i, j) else p_p
-        #         p_n = self.x['p\''][i-1, j] if not self._at_edge_('n', i, j) else p_p
-                
-        #         d_p = self._area_('w') * self.alpha_m / a_p
-        #         self.x['u'][i, j] -= d_p * (1/2) * (p_e - p_w)
-                
-        #         d_p = self._area_('n') * self.alpha_m / a_p
-        #         self.x['v'][i, j] -= d_p * (1/2) * (p_n - p_s)
-        
         a_p = self.A['m']['p'][1:-1, 1:-1]
         p_p = self.x['p\''][1:-1, 1:-1]
         p_w = self.x['p\''][1:-1, 0:-2]
@@ -1036,34 +746,6 @@ class NavierStokesSolver:
         self.x['v'][1:-1, 1:-1] -= self._area_('n') * d_p * (1/2) * (p_n - p_s)
         
     def _correct_face_v_(self):
-        
-        # for i in range(1, self.n_rows + 1): # ignore east faces in top and  bottom ghost row cells
-        #     for j in range(1, self.n_cols): # iterate over east faces
-                
-        #         a_p = self.A['m']['p'][i, j]
-        #         a_e = self.A['m']['p'][i, j+1]
-                
-        #         p_p = self.x['p\''][i, j]
-        #         p_e = self.x['p\''][i, j+1]
-                
-        #         d_p = (self._area_('e') * self.alpha_m / a_p) 
-        #         d_e = (self._area_('e') * self.alpha_m / a_e) 
-
-        #         self.x['u_f'][i, j] -= (1/2) * (d_e + d_p) * (p_e - p_p)
-            
-        # for i in range(1, self.n_rows): # iterate over south faces
-        #     for j in range(1, self.n_cols + 1): # ignore south faces in left and right ghost column cells
-                
-        #         a_p = self.A['m']['p'][i, j]
-        #         a_s = self.A['m']['p'][i+1, j]
-                
-        #         p_p = self.x['p\''][i, j]
-        #         p_s = self.x['p\''][i+1, j]
-                
-        #         d_p = (self._area_('s') * self.alpha_m / a_p) #* self._area_('s')
-        #         d_s = (self._area_('s') * self.alpha_m / a_s) #* self._area_('s')
-
-        #         self.x['v_f'][i, j] -= (1/2) * (d_s + d_p) * (p_p - p_s)
    
         a_e = self.A['m']['p'][1:-1, 2:-1]  
         a_p = self.A['m']['p'][1:-1, 1:-2]
@@ -1090,36 +772,6 @@ class NavierStokesSolver:
         
             
     ########## HELPERS ###########  
-    
-    def _peclet_(self,nbr, i, j):
-        F = self._f_(nbr, i, j)
-        D = self.D[nbr]
-        
-        if D:
-            return F / D
-        else:
-            return float('inf') 
-
-    def _f_(self, to, i, j):
-
-        if to == 's':
-            return self.x['v_f'][i, j] * self._area_(to)
-        elif to == 'n':
-            return self.x['v_f'][i-1, j] * self._area_(to)
-        elif to == 'e':
-            return self.x['u_f'][i, j] * self._area_(to)
-        elif to == 'w':
-            return self.x['u_f'][i, j-1] * self._area_(to)
-    
-    def _at_edge_(self, face, i, j):
-        if face == 'e':
-            return j == self.n_cols
-        if face == 'w':
-            return j == 1
-        if face == 's':
-            return i == self.n_rows
-        if face == 'n':
-            return i == 1
         
     def _area_(self, face):
         if face == 'e' or face == 'w':
