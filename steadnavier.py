@@ -1,3 +1,5 @@
+
+
 from numbers import Number
 import numpy as np
 from scipy.sparse import coo_matrix, dia_matrix
@@ -8,6 +10,8 @@ from scipy.interpolate import RectBivariateSpline
 import linear_solver
 
 
+
+from matplotlib.patches import Rectangle
 
 
 class NavierStokesSolver:
@@ -43,6 +47,8 @@ class NavierStokesSolver:
     
     A_diag              : dia_matrix
     
+    obstacles           : Tuple[Tuple]
+    
     def __init__(
         
         self, 
@@ -73,7 +79,9 @@ class NavierStokesSolver:
         Re                  : float = 100,
         mass_density        : float = 1,
         alpha_m             : float = 0.8,
-        alpha_p             : float = 0.3
+        alpha_p             : float = 0.3,
+        
+        obstacle_coords     : List[Tuple[Tuple]] = None
         
         ):
         
@@ -104,9 +112,100 @@ class NavierStokesSolver:
         self.x['v_f']   = np.zeros((self.n_rows + 1, self.n_cols + 2))        
         self.x['u']     = np.zeros(((self.n_rows + 2), (self.n_cols + 2)))
         self.x['v']     = np.zeros(((self.n_rows + 2), (self.n_cols + 2)))
+        
+        self.x['u'][0, :]                 = self.B['u']['n']
+        self.x['u'][self.n_rows + 1, :]   = self.B['u']['s']
+        self.x['u'][:, self.n_cols]       = self.B['u']['e']
+        self.x['u'][:, 0]                 = self.B['u']['w']
+        
+        self.x['v'][0, :]                 = self.B['v']['n']
+        self.x['v'][self.n_rows, :]       = self.B['v']['s']
+        self.x['v'][:, self.n_cols + 1]   = self.B['v']['e']
+        self.x['v'][:, 0]                 = self.B['v']['w']
+        
         self.x['s']     = np.zeros(((self.n_rows + 2), (self.n_cols + 2)))
         
         self.gamma      = gamma
+        
+        self.boundary_mask = np.zeros((self.n_rows + 2, self.n_cols + 2)).astype(bool)
+        self.u_f_boundary_mask = np.zeros_like(self.x['u_f']).astype(bool)
+        self.v_f_boundary_mask = np.zeros_like(self.x['v_f']).astype(bool)
+        self.boundary_mask[[0, -1], :] = True
+        self.boundary_mask[:, [0, -1]] = True
+        self.u_f_boundary_mask[[0, -1], :] = True
+        self.u_f_boundary_mask[:, [0, -1]] = True
+        self.v_f_boundary_mask[:, [0, -1]] = True
+        self.v_f_boundary_mask[[0, -1], :] = True
+
+        self.interior_mask = ~self.boundary_mask
+        self.u_f_interior_mask = ~self.u_f_boundary_mask
+        self.v_f_interior_mask = ~self.v_f_boundary_mask
+        
+        self.obstacle_mask = np.zeros((self.n_rows + 2, self.n_cols + 2)).astype(bool)
+        self.obstacles = []
+        if obstacle_coords:
+            for obs in obstacle_coords:
+                
+                (x1, y1), (x2, y2) = self._obstacle_coords_(obs) 
+                self.obstacles.append(((x1, y1), (x2, y2)))
+                
+                self.obstacle_mask[y1:y2+1, x1:x2+1] = True
+
+        self.u_f_obstacle_mask = ((self.obstacle_mask[:, :-1] == True) | (self.obstacle_mask[:, 1:] == True))
+        self.v_f_obstacle_mask = ((self.obstacle_mask[:-1, :] == True) | (self.obstacle_mask[1:, :] == True))
+        
+        self.fluid_mask = ~self.obstacle_mask & ~self.boundary_mask
+        self.u_f_fluid_mask = ~self.u_f_obstacle_mask & ~self.u_f_boundary_mask
+        self.v_f_fluid_mask = ~self.v_f_obstacle_mask & ~self.v_f_boundary_mask
+          
+          
+        self.e_nbr_mask                 = np.zeros((self.n_rows+2, self.n_cols+2)).astype(bool)
+        self.e_nbr_mask[1:-1, 2:]       = self.fluid_mask[1:-1, 1:-1]
+        self.w_nbr_mask                 = np.zeros((self.n_rows+2, self.n_cols+2)).astype(bool)
+        self.w_nbr_mask[1:-1, :-2]      = self.fluid_mask[1:-1, 1:-1]
+        self.n_nbr_mask                 = np.zeros((self.n_rows+2, self.n_cols+2)).astype(bool)
+        self.n_nbr_mask[:-2, 1:-1]      = self.fluid_mask[1:-1, 1:-1]
+        self.s_nbr_mask                 = np.zeros((self.n_rows+2, self.n_cols+2)).astype(bool)
+        self.s_nbr_mask[2:, 1:-1]       = self.fluid_mask[1:-1, 1:-1]
+        
+        
+
+        self.has_e_nbr_mask = self.fluid_mask[1:-1, 1:-1]  & self.fluid_mask[1:-1, 2:]
+        self.has_e_src_mask = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.has_e_src_mask[:, -1] = True
+        
+        self.has_w_nbr_mask = self.fluid_mask[1:-1, 1:-1]  & self.fluid_mask[1:-1, :-2]
+        self.has_w_src_mask = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.has_w_src_mask[:, 0] = True
+
+        self.has_s_nbr_mask = self.fluid_mask[1:-1, 1:-1]  & self.fluid_mask[2:, 1:-1]
+        self.has_s_src_mask = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.has_s_src_mask[-1, :] = True
+        
+        self.has_n_nbr_mask = self.fluid_mask[1:-1, 1:-1]  & self.fluid_mask[:-2, 1:-1]
+        self.has_n_src_mask = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.has_n_src_mask[0, :] = True
+        
+        self.w_edges_mask   = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.w_edges_mask[:, 1:] = ~self.fluid_mask[1:-1, 2:-1] & self.fluid_mask[1:-1, 1:-2]
+        
+        self.e_edges_mask   = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.e_edges_mask[:, :-1] =self.fluid_mask[1:-1, 2:-1] & ~ self.fluid_mask[1:-1, 1:-2] 
+        
+        self.n_edges_mask   = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.n_edges_mask[1:, :] = ~self.fluid_mask[2:-1, 1:-1] & self.fluid_mask[1:-2, 1:-1]
+        
+        self.s_edges_mask   = np.zeros((self.n_rows, self.n_cols)).astype(bool)
+        self.s_edges_mask[:-1, :] =self.fluid_mask[2:-1, 1:-1] & ~ self.fluid_mask[1:-2, 1:-1] 
+        
+        self.has_e_obs_mask = np.roll(self.w_edges_mask, -1, 1)
+        self.has_w_obs_mask = np.roll(self.e_edges_mask, 1, 1)
+        self.has_n_obs_mask = np.roll(self.s_edges_mask, 1, 0)
+        self.has_s_obs_mask = np.roll(self.n_edges_mask, -1, 0)
+    
+        
+        
+
         
         if u is None: # We need to solve for velocity fields
             
@@ -133,6 +232,9 @@ class NavierStokesSolver:
             self.x['v_f'][self.n_rows, :]       = self.B['v']['s']
             self.x['v_f'][:, self.n_cols + 1]   = self.B['v']['e']
             self.x['v_f'][:, 0]                 = self.B['v']['w']
+            
+            
+
             
         else: # Use the known velocityy field to construct a matrix storing face velocities (giving convective link coefficients)
             
@@ -216,7 +318,23 @@ class NavierStokesSolver:
             self.x['v'][:, 0]                                       = self.B['v']['w']
             
             # setting the pressure link coefficients
+            
 
+    def _obstacle_coords_(self, obstacle_coords):
+        # Obstacle coordinates in real-world space
+        (x1_real, y1_real), (x2_real, y2_real) = obstacle_coords
+        
+        x1 = x1_real/self.L_x
+        x2 = x2_real/self.L_x
+        y1 = y1_real/self.L_y
+        y2 = y2_real/self.L_y
+        # Map real-world coordinates to grid indices
+        pixel_x1 = int(x1 * self.n_cols)  + 1
+        pixel_y1 = (self.n_rows - 1) - int(y2*self.n_rows) + 1
+        pixel_x2 = int(x2 * self.n_cols)  + 1
+        pixel_y2 = (self.n_rows - 1) - int(y1*self.n_rows) + 1
+        
+        return (pixel_x1, pixel_y1), (pixel_x2, pixel_y2)
     
     def import_params(self, u, v, u_f, v_f, p):
         
@@ -353,6 +471,12 @@ class NavierStokesSolver:
         if v_field_str:
             ax.text(0, -0.1, f'${{\\bf u}} = \\langle {v_field_str[0]}, {v_field_str[1]} \\rangle$' , 
                     ha='center', va='center', transform=ax.transAxes, fontsize=12, weight='bold')  
+            
+        
+        for obstacle in self.obstacles:
+            (x1,y1),(x2,y2) = obstacle
+            ax.add_patch(Rectangle((x1-1, self.n_cols - y1), x2-x1, y1-y2,  fill='white', hatch='..'))
+            #plt.plot(obstacle_coords[:, 1], obstacle_coords[:, 0], 'ks', label="Obstacles", markersize=1)
         
 
         if save:
@@ -403,7 +527,11 @@ class NavierStokesSolver:
         plt.show()
         
     
-    def order_conv(self, exact_res: float = 320, coarse_res: float = 80, fine_res: float = 160, objective: Literal['\phi', 'uvp'] ='\phi') -> float:
+    def order_conv(self, 
+                   exact_res: float = 320, 
+                   coarse_res: float = 80, 
+                   fine_res: float = 160,
+                   objective: Literal['\phi', 'uvp'] ='\phi') -> float:
 
         exact_solver = NavierStokesSolver(**{**self._constructor_args_, 'n_cols': exact_res, 'n_rows': exact_res})
         coarse_solver = NavierStokesSolver(**{**self._constructor_args_, 'n_cols': coarse_res, 'n_rows': coarse_res})
@@ -457,7 +585,7 @@ class NavierStokesSolver:
         
         b_e, b_w, b_n, b_s = None, None, None, None
         if self.scheme == "central_difference":
-            b_e, b_w, b_n, b_s = self._scalar_coeff_cd_(
+            b_e, b_w, b_n, b_s = self._scalar_coeff_cd2_(
                 self.A[objective]['p'],
                 self.A[objective]['e'],
                 self.A[objective]['w'],
@@ -482,43 +610,62 @@ class NavierStokesSolver:
                 )
             
         if objective == '\phi':
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['\phi'], self.B['\phi'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['\phi'], self.x['\phi'])
+            self._zero_obstacles_phi_()
         else:
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['u'], self.B['u'])
-            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['v'], self.B['v'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['u'], self.x['u'])
+            self._scalar_src_(b_e, b_w, b_n, b_s, self.b['v'], self.x['v'])
             
-            self.b['u'][1:-1, 1:-1] -= self._p_src_('u')
-            self.b['v'][1:-1, 1:-1] -= self._p_src_('v')
+            self.b['u'][self.fluid_mask] -= self._p_src_('u')
+            self.b['v'][self.fluid_mask] -= self._p_src_('v')
             
-            self.A['m']['p'][1:-1, 1:-1] /= self.alpha_m
-            self.b['u'][1:-1, 1:-1] += (1 - self.alpha_m) * self.A['m']['p'][1:-1, 1:-1] * self.x['u'][1:-1, 1:-1]
-            self.b['v'][1:-1, 1:-1] += (1 - self.alpha_m) * self.A['m']['p'][1:-1, 1:-1] * self.x['v'][1:-1, 1:-1]
+            self.A['m']['p'][self.fluid_mask] /= self.alpha_m
+            self.b['u'][self.fluid_mask] += (1 - self.alpha_m) * self.A['m']['p'][self.fluid_mask] * self.x['u'][self.fluid_mask]
+            self.b['v'][self.fluid_mask] += (1 - self.alpha_m) * self.A['m']['p'][self.fluid_mask] * self.x['v'][self.fluid_mask]
+            
+    def _zero_obstacles_m_(self):
+            self.A['m']['p'][self.obstacle_mask] = 1
+            self.A['m']['e'][self.obstacle_mask] = 0
+            self.A['m']['w'][self.obstacle_mask] = 0
+            self.A['m']['n'][self.obstacle_mask] = 0
+            self.A['m']['s'][self.obstacle_mask] = 0
+            self.b['u'][self.obstacle_mask] = 0
+            self.b['v'][self.obstacle_mask] = 0
+            
+    def _zero_obstacles_pp_(self):
+            self.A['m']['p'][self.obstacle_mask] = 1
+            self.A['m']['e'][self.obstacle_mask] = 0
+            self.A['m']['w'][self.obstacle_mask] = 0
+            self.A['m']['n'][self.obstacle_mask] = 0
+            self.A['m']['s'][self.obstacle_mask] = 0
+            self.b['p\''][self.obstacle_mask] = 0
+     
+            
+    def _zero_obstacles_phi_(self):
+            self.A['\phi']['p'][self.obstacle_mask] = 1
+            self.A['\phi']['e'][self.obstacle_mask] = 0
+            self.A['\phi']['w'][self.obstacle_mask] = 0
+            self.A['\phi']['n'][self.obstacle_mask] = 0
+            self.A['\phi']['s'][self.obstacle_mask] = 0
+            self.b['\phi'][self.obstacle_mask] = 0
+
+            
+            
+    def _zero_obstacles_uv_f_(self):
+            self.x['u_f'][self.u_f_obstacle_mask] = 0
+            self.x['v_f'][self.v_f_obstacle_mask] = 0
+
             
             
     def _p_src_(self, objective):
 
         
         if objective == "u":
-            return  (1/2) * (self.x['p'][1:-1, 2:] - self.x['p'][1:-1, 0:-2]) * self._area_('e') 
+            return  (1/2) * (self.x['p'][self.e_nbr_mask] - self.x['p'][self.w_nbr_mask]) * self._area_('e') 
                     
         elif objective == "v":
-            return (1/2) * (self.x['p'][0:-2, 1:-1] - self.x['p'][2:, 1:-1]) * self._area_('n')
+            return (1/2) * (self.x['p'][self.n_nbr_mask] - self.x['p'][self.s_nbr_mask]) * self._area_('n')
         
-        
-    def _set_arrays_(self, a_P, a_E, a_W, a_N, a_S, S_u, i, j, objective: Literal['\phi', 'm', 'p\'']='\phi'):
-        
-        self.A[objective]['p'][i, j] = np.float32(a_P)
-        self.A[objective]['e'][i, j] = np.float32(a_E)
-        self.A[objective]['w'][i, j] = np.float32(a_W)
-        self.A[objective]['n'][i, j] = np.float32(a_N)
-        self.A[objective]['s'][i, j] = np.float32(a_S)
-              
-        if objective != 'm':
-            self.b[objective][i, j] = np.float32(S_u)
-        else:
-            self.b['u'][i, j] = np.float32(S_u[0])
-            self.b['v'][i, j] = np.float32(S_u[1])
-    
     
     def _to_sparse_(self, a_E, a_W, a_N, a_S, a_P):
         nrows, ncols = self.n_rows, self.n_cols
@@ -540,16 +687,6 @@ class NavierStokesSolver:
 
         # Convert to CSC format for solver compatibility
         return self.A_diag.tocsc()    
-    
-    def _clear_a_diag(self):
-        
-        nrows, ncols = self.n_rows, self.n_cols
-        num_cells = nrows * ncols
-        self.A_diag.setdiag(0, k=0) 
-        self.A_diag.setdiag(0, k=1)    
-        self.A_diag.setdiag(0, k=-1)     
-        self.A_diag.setdiag(0, k=-ncols)  
-        self.A_diag.setdiag(0, k=ncols)
             
     def _solve_sparse_(self, objective: Literal["\phi", "m", "p\'"] = "\phi") -> Tuple[np.ndarray, float] :
         
@@ -607,11 +744,12 @@ class NavierStokesSolver:
                                                                                                                                                                                       
     def _p_corr_coeffs_(self):
         
-        a_p = self.A['m']['p'][1:-1, 1:-1]
-        a_n = self.A['m']['p'][:-2, 1:-1]
-        a_s = self.A['m']['p'][2:, 1:-1]
-        a_e = self.A['m']['p'][1:-1, 2:]
-        a_w = self.A['m']['p'][1:-1, :-2]
+
+        a_p = self.A['m']['p'][self.fluid_mask]
+        a_n = self.A['m']['p'][self.n_nbr_mask]
+        a_s = self.A['m']['p'][self.s_nbr_mask]
+        a_e = self.A['m']['p'][self.e_nbr_mask]
+        a_w = self.A['m']['p'][self.w_nbr_mask]
 
         d_px = self._area_('e') / a_p
         d_py = self._area_('n') / a_p
@@ -622,30 +760,33 @@ class NavierStokesSolver:
         d_s = np.where(a_s, (1/2) * (self._area_('s') / a_s + d_py), 0)
 
         # Update A['p\''] matrices for 'e', 'w', 'n', 's'
-        self.A['p\'']['e'][1:-1, 1:-1] = self.alpha_m * d_e * self._area_('e')
-        self.A['p\'']['w'][1:-1, 1:-1] = self.alpha_m * d_w * self._area_('w')
-        self.A['p\'']['n'][1:-1, 1:-1] = self.alpha_m * d_n * self._area_('n')
-        self.A['p\'']['s'][1:-1, 1:-1] = self.alpha_m * d_s * self._area_('s')
-
+        self.A['p\'']['e'][self.fluid_mask] = self.alpha_m * d_e * self._area_('e')
+        self.A['p\'']['w'][self.fluid_mask] = self.alpha_m * d_w * self._area_('w')
+        self.A['p\'']['n'][self.fluid_mask] = self.alpha_m * d_n * self._area_('n')
+        self.A['p\'']['s'][self.fluid_mask] = self.alpha_m * d_s * self._area_('s')
+        
         # Compute central coefficient (sum of neighbor coefficients)
-        self.A['p\'']['p'][1:-1, 1:-1] = (
-            self.A['p\'']['e'][1:-1, 1:-1]
-            + self.A['p\'']['w'][1:-1, 1:-1]
-            + self.A['p\'']['n'][1:-1, 1:-1]
-            + self.A['p\'']['s'][1:-1, 1:-1]
+        self.A['p\'']['p'][self.fluid_mask] = (
+            self.A['p\'']['e'][self.fluid_mask]
+            + self.A['p\'']['w'][self.fluid_mask]
+            + self.A['p\'']['n'][self.fluid_mask]
+            + self.A['p\'']['s'][self.fluid_mask]
         )
 
         # Compute b['p\''], dependent on face velocities
-        # =============================RHIE_CHOW_DEPENDENT================================ #
-        uf_e = self.x['u_f'][1:-1, 1:]
-        uf_w = self.x['u_f'][1:-1, :-1]
-        uf_s = self.x['v_f'][1:, 1:-1]
-        uf_n = self.x['v_f'][:-1, 1:-1]
+        uf_e = self.x['u_f'][1:-1, 1:][self.has_e_nbr_mask]
+        uf_w = self.x['u_f'][1:-1, :-1][self.has_w_nbr_mask]
+        uf_s = self.x['v_f'][1:, 1:-1][self.has_s_nbr_mask]
+        uf_n = self.x['v_f'][:-1, 1:-1][self.has_n_nbr_mask]
 
-        self.b['p\''][1:-1, 1:-1] = (
-            (uf_w * self._area_('w') - uf_e * self._area_('e'))
-            + (uf_s * self._area_('s') - uf_n * self._area_('n'))
-        )
+        # =============================RHIE_CHOW_DEPENDENT================================ #
+        
+        self.b['p\''][1:-1, 1:-1][self.has_e_nbr_mask] -= uf_e * self._area_('e')
+        self.b['p\''][1:-1, 1:-1][self.has_w_nbr_mask] += uf_w * self._area_('w') 
+        self.b['p\''][1:-1, 1:-1][self.has_n_nbr_mask] -= uf_n * self._area_('n')
+        self.b['p\''][1:-1, 1:-1][self.has_s_nbr_mask] += uf_s * self._area_('s')
+
+
         # =============================RHIE_CHOW_DEPENDENT================================ #
 
 
@@ -677,6 +818,62 @@ class NavierStokesSolver:
         A_p[1:-1, 1]    += b_w
         A_p[1, 1:-1]    += b_n
         A_p[-2, 1:-1]   += b_s
+        
+        return b_e, b_w, b_n, b_s
+    
+    def _scalar_coeff_cd2_(self, A_p, A_e, A_w, A_n, A_s):
+        
+        
+        
+        F_e = self.x['u_f'][1:-1, 1:] * self._area_('e')
+        F_w = self.x['u_f'][1:-1, :-1] * self._area_('w')
+        F_n = self.x['v_f'][:-1, 1:-1] * self._area_('n')
+        F_s = self.x['v_f'][1:, 1:-1] * self._area_('s')
+
+        
+        A_e[1:-1,1:-1][self.has_e_nbr_mask]                             =  self.D['e']      - (1/2) * F_e[self.has_e_nbr_mask]  
+        A_e[1:-1,1:-1][~self.has_e_nbr_mask]                            =  0
+        b_e = np.zeros((self.n_rows, self.n_cols))
+        b_e[self.has_e_src_mask]                                        =  2 * self.D['e']  - F_e[self.has_e_src_mask]  
+        b_e[self.has_e_obs_mask]                                        = - F_e[self.has_e_obs_mask]  
+        
+        A_w[1:-1,1:-1][self.has_w_nbr_mask]                             =  self.D['w']      + (1/2) * F_w[self.has_w_nbr_mask]  
+        A_w[1:-1,1:-1][~self.has_w_nbr_mask]                            =  0
+        b_w = np.zeros((self.n_rows, self.n_cols))
+        b_w[self.has_w_src_mask]                                        =  2 * self.D['w']  + F_w[self.has_w_src_mask]
+        b_w[self.has_w_obs_mask]                                        = F_w[self.has_w_obs_mask]
+        
+        A_n[1:-1,1:-1][self.has_n_nbr_mask]                             =  self.D['n']      - (1/2) * F_n[self.has_n_nbr_mask]  
+        A_n[1:-1,1:-1][~self.has_n_nbr_mask]                            =  0
+        b_n = np.zeros((self.n_rows, self.n_cols))
+        b_n[self.has_n_src_mask]                                        =  2 * self.D['n']  - F_n[self.has_n_src_mask] 
+        b_n[self.has_n_obs_mask]                                             = - F_n[self.has_n_obs_mask] 
+        
+        A_s[1:-1,1:-1][self.has_s_nbr_mask]                             =  self.D['s']      + (1/2) * F_s[self.has_s_nbr_mask] 
+        A_s[1:-1,1:-1][~self.has_s_nbr_mask]                            =  0
+        b_s = np.zeros((self.n_rows, self.n_cols))
+        b_s[self.has_s_src_mask]                                        =  2 * self.D['s']  + F_s[self.has_s_src_mask]
+        b_s[self.has_s_obs_mask]                                        = F_s[self.has_s_obs_mask]
+        
+        A_p[1:-1, 1:-1] = A_e[1:-1, 1:-1] + A_w[1:-1, 1:-1] + A_n[1:-1, 1:-1] + A_s[1:-1, 1:-1]  + F_e - F_w + F_n - F_s
+        
+        A_p[1:-1,1:-1][self.has_e_src_mask]    += b_e[self.has_e_src_mask]
+        A_p[1:-1,1:-1][self.has_w_src_mask]    += b_w[self.has_w_src_mask]
+        A_p[1:-1,1:-1][self.has_n_src_mask]    += b_n[self.has_n_src_mask]
+        A_p[1:-1,1:-1][self.has_s_src_mask]    += b_s[self.has_s_src_mask]
+        
+        A_p[1:-1,1:-1][self.has_e_obs_mask]    += b_e[self.has_e_obs_mask]
+        A_p[1:-1,1:-1][self.has_w_obs_mask]    += b_w[self.has_w_obs_mask]
+        A_p[1:-1,1:-1][self.has_n_obs_mask]    += b_n[self.has_n_obs_mask]
+        A_p[1:-1,1:-1][self.has_s_obs_mask]    += b_s[self.has_s_obs_mask]
+        
+        
+        
+        A_p[self.obstacle_mask] = 0
+        A_w[self.obstacle_mask] = 0
+        A_e[self.obstacle_mask] = 0
+        A_n[self.obstacle_mask] = 0
+        A_s[self.obstacle_mask] = 0
         
         return b_e, b_w, b_n, b_s
         
@@ -721,19 +918,19 @@ class NavierStokesSolver:
 
         A_e[1:-1, 1:-2] = np.maximum(   self.D['e'] - (1/2) * F_e[:, :-1],  np.maximum(0, -F_e[:, :-1]))   
         A_e[1:-1, -2]   = 0
-        b_e             = np.maximum(   2 * self.D['e']  - F_e[:, -1],      np.maximum(0, -F_e[:, -1]))
+        b_e             = np.maximum(   self.D['e']  - (1/2) * F_e[:, -1],      np.maximum(0, -F_e[:, -1]))
         
         A_w[1:-1, 2:-1] = np.maximum(   self.D['w'] + (1/2) * F_w[:, 1:],   np.maximum(0, F_w[:, 1:]))
         A_w[1:-1, 1]    = 0
-        b_w             = np.maximum(   2 * self.D['w'] + F_w[:, 0],        np.maximum(0, F_w[:, 0]))
+        b_w             = np.maximum(   self.D['w'] + (1/2) * F_w[:, 0],        np.maximum(0, F_w[:, 0]))
         
         A_n[2:-1, 1:-1] = np.maximum(   self.D['n'] - (1/2) * F_n[1:, :],   np.maximum(0, -F_n[1:, :])) 
         A_n[1, 1:-1]    = 0
-        b_n             = np.maximum(   2 * self.D['n'] - F_n[0, :],        np.maximum(0, -F_n[0, :]))
+        b_n             = np.maximum(   self.D['n'] - (1/2) * F_n[0, :],        np.maximum(0, -F_n[0, :]))
         
         A_s[1:-2, 1:-1] = np.maximum(   self.D['s'] + (1/2) * F_s[:-1, :],  np.maximum(0, F_s[:-1, :]))
         A_s[-2, 1:-1]   = 0
-        b_s             = np.maximum(   2 * self.D['s'] + F_s[-1, :],       np.maximum(0, F_s[-1, :]))   
+        b_s             = np.maximum(   self.D['s'] + (1/2) * F_s[-1, :],       np.maximum(0, F_s[-1, :]))   
         
         A_p[1:-1, 1:-1] = A_e[1:-1, 1:-1] + A_w[1:-1, 1:-1] + A_n[1:-1, 1:-1] + A_s[1:-1, 1:-1]  + F_e - F_w + F_n - F_s
         A_p[1:-1, -2]   += b_e                
@@ -743,68 +940,71 @@ class NavierStokesSolver:
         
         return b_e, b_w, b_n, b_s  
     
-    def _scalar_src_(self, b_e, b_w, b_n, b_s, b, B):
+    def _scalar_src_(self, b_e, b_w, b_n, b_s, b, x):
         
         b[:, :]         = 0
-        b[1:-1, -2]     += b_e * B['e']
-        b[1:-1, 1]      += b_w * B['w']
-        b[1, 1:-1]      += b_n * B['n']
-        b[-2, 1:-1]     += b_s * B['s']
+        
+        b[1:-1, 1:-1][self.has_e_src_mask] += b_e[self.has_e_src_mask] * x[1:-1, 2:][self.has_e_src_mask]
+        b[1:-1, 1:-1][self.has_w_src_mask] += b_w[self.has_w_src_mask] * x[1:-1, :-2][self.has_w_src_mask]
+        b[1:-1, 1:-1][self.has_n_src_mask] += b_n[self.has_n_src_mask] * x[:-2 , 1:-1][self.has_n_src_mask]
+        b[1:-1, 1:-1][self.has_s_src_mask] += b_s[self.has_s_src_mask] * x[2:, 1:-1][self.has_s_src_mask]
        
                     
     def _interp_face_v_(self):
         
         
-        a_e = self.A['m']['p'][1:-1, 2:-1]   # a_e at east face 
-        a_p = self.A['m']['p'][1:-1, 1:-2]  # a_p at cell center
+        a_e = self.A['m']['p'][self.e_nbr_mask & self.fluid_mask]   # a_e at east face 
+        a_p = self.A['m']['p'][1:-1, 1:-1][self.has_e_nbr_mask]  # a_p at cell center
 
-        u_e = self.x['u'][1:-1, 2:-1]         # u_e at east face
-        u_p = self.x['u'][1:-1, 1:-2]       # u_p at west face
+        u_e = self.x['u'][self.e_nbr_mask & self.fluid_mask]         # u_e at east face
+        u_p = self.x['u'][1:-1, 1:-1][self.has_e_nbr_mask]       # u_p at west face
 
-        p_ee = self.x['p'][1:-1, 3:]        # Pressure two cells to the east
-        p_e = self.x['p'][1:-1, 2:-1]       # Pressure at east face
-        p_p = self.x['p'][1:-1, 1:-2]       # Pressure at current cell
-        p_w = self.x['p'][1:-1, :-3]        # Pressure one cell to the west
+        p_ee = self.x['p'][np.roll(self.e_nbr_mask & self.fluid_mask, 1, axis=1)]       # Pressure two cells to the east
+        p_e = self.x['p'][self.e_nbr_mask & self.fluid_mask]                            # Pressure at east face
+        p_p = self.x['p'][1:-1, 1:-1][self.has_e_nbr_mask]                                          # Pressure at current cell
+        p_w = self.x['p'][self.w_nbr_mask & self.fluid_mask]                            # Pressure one cell to the west
 
         # Compute diffusivity factors
         d_e = (self._area_('e') / a_e) * self.alpha_m
         d_p = (self._area_('e') / a_p) * self.alpha_m
 
         # Compute u_f (interpolated velocity at the east face)
-        self.x['u_f'][1:-1, 1:-1] = (
+        self.x['u_f'][self.u_f_fluid_mask] = (
             (1 / 2) * (u_e + u_p)
             - (1 / 2) * (d_e + d_p) * (p_e - p_p)
             + (1 / 2) * d_p * ((1 / 2) * (p_e - p_w))
             + (1 / 2) * d_e * ((1 / 2) * (p_ee - p_p))
         )
+        self.x['u_f'][self.u_f_obstacle_mask] = 0
 
         
-        a_s = self.A['m']['p'][2:-1, 1:-1]     # a_s at south face
-        a_p = self.A['m']['p'][1:-2, 1:-1]   # a_p at cell center
+        a_s = self.A['m']['p'][self.s_nbr_mask & self.fluid_mask]     # a_s at south face 
+        a_p = self.A['m']['p'][1:-1, 1:-1][self.has_s_nbr_mask]   # a_p at cell center
 
-        v_s = self.x['v'][2:-1, 1:-1]          # v_s at south face
-        v_p = self.x['v'][1:-2, 1:-1]        # v_p at north face
+        v_s = self.x['v'][self.s_nbr_mask & self.fluid_mask]          # v_s at south face
+        v_p = self.x['v'][1:-1, 1:-1][self.has_s_nbr_mask]        # v_p at north face
 
-        p_n = self.x['p'][:-3, 1:-1]         # Pressure one cell to the north
-        p_p = self.x['p'][1:-2, 1:-1]        # Pressure at current cell
-        p_s = self.x['p'][2:-1, 1:-1]          # Pressure at south face
-        p_ss = self.x['p'][3:, 1:-1]         # Pressure two cells to the south
+        p_n = self.x['p'][self.n_nbr_mask & self.fluid_mask]         # Pressure one cell to the north
+        p_p = self.x['p'][1:-1, 1:-1][self.has_s_nbr_mask]        # Pressure at current cell
+        p_s = self.x['p'][self.s_nbr_mask & self.fluid_mask]          # Pressure at south face
+        p_ss = self.x['p'][np.roll(self.s_nbr_mask & self.fluid_mask, 1, axis=0)]         # Pressure two cells to the south
 
         # Compute diffusivity factors
         d_s = (self._area_('s') / a_s) * self.alpha_m
         d_p = (self._area_('s') / a_p) * self.alpha_m
 
         # Compute v_f (interpolated velocity at the south face)
-        self.x['v_f'][1:-1, 1:-1] = (
+        self.x['v_f'][self.v_f_fluid_mask] = (
             (1 / 2) * (v_s + v_p)
             - (1 / 2) * (d_s + d_p) * (p_p - p_s)
             + (1 / 2) * d_p * ((1 / 2) * (p_n - p_s))
             + (1 / 2) * d_s * ((1 / 2) * (p_p - p_ss))
         )
+        self.x['v_f'][self.v_f_obstacle_mask] = 0
      
     def _correct_p_(self):
         
-        self.x['p'] += self.alpha_p * self.x["p\'"]
+        self.x['p'][self.fluid_mask] += self.alpha_p * self.x["p\'"][self.fluid_mask]
         
         # neuman boundary with no pressure grad
         self._set_p_boundary_()
@@ -815,44 +1015,49 @@ class NavierStokesSolver:
         self.x['p'][1:self.n_rows+1, 0]               = self.x['p'][1:self.n_rows+1, 1]
         self.x['p'][1:self.n_rows+1, self.n_cols+1]   = self.x['p'][1:self.n_rows+1, self.n_cols]
         
+        self.x['p'][1:-1, 1:-1][self.e_edges_mask] = self.x['p'][1:-1, :-2][self.e_edges_mask]
+        self.x['p'][1:-1, 1:-1][self.w_edges_mask] = self.x['p'][1:-1, 2:][self.w_edges_mask]
+        self.x['p'][1:-1, 1:-1][self.n_edges_mask] = self.x['p'][2:, 1:-1][self.n_edges_mask]
+        self.x['p'][1:-1, 1:-1][self.s_edges_mask] = self.x['p'][:-2, 1:-1][self.s_edges_mask]
+        
     def _correct_cell_v_(self):
         
-        a_p = self.A['m']['p'][1:-1, 1:-1]
-        p_p = self.x['p\''][1:-1, 1:-1]
-        p_w = self.x['p\''][1:-1, 0:-2]
-        p_e = self.x['p\''][1:-1, 2:]
-        p_s = self.x['p\''][2:, 1:-1]
-        p_n = self.x['p\''][0:-2, 1:-1]
+        a_p = self.A['m']['p'][self.fluid_mask]
+        p_p = self.x['p\''][self.fluid_mask]
+        p_w = self.x['p\''][self.w_nbr_mask]
+        p_e = self.x['p\''][self.e_nbr_mask]
+        p_s = self.x['p\''][self.s_nbr_mask]
+        p_n = self.x['p\''][self.n_nbr_mask]
         
-        d_p = self.alpha_m / a_p    # without area, to be multiplied below
+        d_p = self.alpha_m / a_p
         
-        self.x['u'][1:-1, 1:-1] -= self._area_('w') * d_p * (1/2) * (p_e - p_w)
-        self.x['v'][1:-1, 1:-1] -= self._area_('n') * d_p * (1/2) * (p_n - p_s)
+        self.x['u'][self.fluid_mask] -= self._area_('w') * d_p * (1/2) * (p_e - p_w)
+        self.x['v'][self.fluid_mask] -= self._area_('n') * d_p * (1/2) * (p_n - p_s)
         
     def _correct_face_v_(self):
    
-        a_e = self.A['m']['p'][1:-1, 2:-1]  
-        a_p = self.A['m']['p'][1:-1, 1:-2]
+        a_e = self.A['m']['p'][self.e_nbr_mask & self.fluid_mask]  
+        a_p = self.A['m']['p'][1:-1, 1:-1][self.has_e_nbr_mask]
 
-        p_e = self.x['p\''][1:-1, 2:-1]     
-        p_p = self.x['p\''][1:-1, 1:-2] 
+        p_e = self.x['p\''][self.e_nbr_mask &  self.fluid_mask]     
+        p_p = self.x['p\''][1:-1, 1:-1][self.has_e_nbr_mask] 
         
         d_p = (self._area_('e') * self.alpha_m / a_p) 
         d_e = (self._area_('e') * self.alpha_m / a_e) 
 
-        self.x['u_f'][1:-1, 1:-1] -= (1/2) * (d_e + d_p) * (p_e - p_p)
+        self.x['u_f'][self.u_f_fluid_mask] -= (1/2) * (d_e + d_p) * (p_e - p_p)
             
   
-        a_s = self.A['m']['p'][2:-1, 1:-1]
-        a_p = self.A['m']['p'][1:-2, 1:-1]
+        a_s = self.A['m']['p'][self.s_nbr_mask & self.fluid_mask]
+        a_p = self.A['m']['p'][1:-1, 1:-1][self.has_s_nbr_mask]
         
-        p_p = self.x['p\''][1:-2, 1:-1]     
-        p_s = self.x['p\''][2:-1, 1:-1]
+        p_s = self.x['p\''][self.s_nbr_mask & self.fluid_mask]    
+        p_p = self.x['p\''][1:-1, 1:-1][self.has_s_nbr_mask] 
         
         d_p = (self._area_('s') * self.alpha_m / a_p) 
         d_s = (self._area_('s') * self.alpha_m / a_s) 
 
-        self.x['v_f'][1:-1, 1:-1] -= (1/2) * (d_s + d_p) * (p_p - p_s)
+        self.x['v_f'][self.v_f_fluid_mask] -= (1/2) * (d_s + d_p) * (p_p - p_s)
         
             
     ########## HELPERS ###########  
