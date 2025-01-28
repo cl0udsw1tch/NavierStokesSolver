@@ -4,7 +4,7 @@ from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import  gmres, spilu, LinearOperator
 import math
 
-def solve(A: csc_matrix, b, random_upper=None):
+def solve(A: csc_matrix, b, random_upper=None, rtol=1e-5, atol=0):
     
     # print("Solving...")
     # print("Generating preconditioner...")
@@ -31,7 +31,7 @@ def solve(A: csc_matrix, b, random_upper=None):
     x = None
     residual = None
     try:
-        x, _ = gmres(A, b, M=LinearOperator(A.shape, ilu.solve) )
+        x, _ = gmres(A, b, M=LinearOperator(A.shape, ilu.solve))
         residual = scipy.linalg.norm(b - A@x)
         # print(f"Solution residual: {np.linalg.norm(residual)}")
         # print(f"Solution norm: {np.linalg.norm(x)}")
