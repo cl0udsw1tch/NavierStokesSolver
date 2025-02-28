@@ -1,6 +1,6 @@
 # Navier-Stokes Simulation
 
-This project contains a Python module `navierstokes.py` that simulates fluid dynamics using the Navier-Stokes equations.
+This project contains a Python module `navierstokes.py` that simulates fluid dynamics using the Navier-Stokes equations.  For information regarding the overall methodogoly consult the [report](docs/report.pdf). 
 
 ## Purpose
 
